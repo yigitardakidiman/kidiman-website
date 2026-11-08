@@ -6,7 +6,8 @@ export const config = {
 };
 
 const TOKEN_ENDPOINT = 'https://accounts.spotify.com/api/token';
-const NOW_PLAYING_ENDPOINT = 'https://api.spotify.com/v1/me/player/currently-playing';
+const NOW_PLAYING_ENDPOINT =
+  'https://api.spotify.com/v1/me/player/currently-playing?additional_types=track,episode';
 const RECENTLY_PLAYED_ENDPOINT = 'https://api.spotify.com/v1/me/player/recently-played?limit=1';
 
 // Persist cache across warm serverless invocations and Vite dev server reloads
@@ -15,6 +16,8 @@ const cache = (globalThis.__spotifyApiCache ??= {
   tokenExpiresAt: 0,
   lastData: null,
   lastDataAt: 0,
+  lastPlayedItem: null,
+  lastPlayedAtMs: 0,
   credentials: null,
 });
 
@@ -136,19 +139,71 @@ export async function getSpotifyData() {
     if (nowPlayingRes.status === 200) {
       const song = await nowPlayingRes.json();
       if (song && song.item) {
-        const result = {
-          isPlaying: song.is_playing,
-          isRecentlyPlayed: !song.is_playing,
-          title: song.item.name,
-          artist: song.item.artists.map((artist) => artist.name).join(', '),
-          album: song.item.album.name,
-          albumImageUrl: song.item.album.images?.[0]?.url || '',
-          songUrl: song.item.external_urls?.spotify || 'https://open.spotify.com',
-          progressMs: song.progress_ms,
-          durationMs: song.item.duration_ms,
-        };
+        const isEpisode =
+          song.currently_playing_type === 'episode' || song.item.type === 'episode';
+
+        let result;
+        if (isEpisode) {
+          const showName = song.item.show?.name || '';
+          const publisher = song.item.show?.publisher || '';
+          const artist = showName || publisher;
+          const album = publisher && publisher !== artist ? publisher : '';
+
+          result = {
+            isPlaying: Boolean(song.is_playing),
+            isRecentlyPlayed: !song.is_playing,
+            isPodcast: true,
+            title: song.item.name,
+            artist,
+            album,
+            albumImageUrl:
+              song.item.images?.[0]?.url || song.item.show?.images?.[0]?.url || '',
+            songUrl:
+              song.item.external_urls?.spotify ||
+              song.item.show?.external_urls?.spotify ||
+              'https://open.spotify.com',
+            progressMs: song.progress_ms ?? 0,
+            durationMs: song.item.duration_ms ?? 0,
+          };
+        } else {
+          result = {
+            isPlaying: Boolean(song.is_playing),
+            isRecentlyPlayed: !song.is_playing,
+            isPodcast: false,
+            title: song.item.name,
+            artist: song.item.artists?.map((artist) => artist.name).join(', ') || '',
+            album: song.item.album?.name || '',
+            albumImageUrl: song.item.album?.images?.[0]?.url || '',
+            songUrl: song.item.external_urls?.spotify || 'https://open.spotify.com',
+            progressMs: song.progress_ms ?? 0,
+            durationMs: song.item.duration_ms ?? 0,
+          };
+        }
+
+        const nowMs = Date.now();
+        if (
+          result.isPlaying ||
+          !cache.lastPlayedItem ||
+          cache.lastPlayedItem.songUrl !== result.songUrl
+        ) {
+          const itemTimestamp = result.isPlaying ? nowMs : song.timestamp || nowMs;
+          cache.lastPlayedItem = {
+            isPlaying: false,
+            isRecentlyPlayed: true,
+            isPodcast: result.isPodcast,
+            title: result.title,
+            artist: result.artist,
+            album: result.album,
+            albumImageUrl: result.albumImageUrl,
+            songUrl: result.songUrl,
+            playedAt: new Date(itemTimestamp).toISOString(),
+            durationMs: result.durationMs,
+          };
+          cache.lastPlayedAtMs = itemTimestamp;
+        }
+
         cache.lastData = result;
-        cache.lastDataAt = Date.now();
+        cache.lastDataAt = nowMs;
         return result;
       }
     } else if (nowPlayingRes.status !== 204) {
@@ -166,14 +221,24 @@ export async function getSpotifyData() {
     if (recentlyPlayedRes.status === 200) {
       const recent = await recentlyPlayedRes.json();
       const item = recent.items?.[0];
+      const recentPlayedAtMs = item?.played_at ? Date.parse(item.played_at) : 0;
+
+      // Spotify's recently-played API excludes podcast episodes; prefer cached item if newer
+      if (cache.lastPlayedItem && cache.lastPlayedAtMs > recentPlayedAtMs) {
+        cache.lastData = cache.lastPlayedItem;
+        cache.lastDataAt = Date.now();
+        return cache.lastPlayedItem;
+      }
+
       if (item && item.track) {
         const result = {
           isPlaying: false,
           isRecentlyPlayed: true,
+          isPodcast: false,
           title: item.track.name,
-          artist: item.track.artists.map((artist) => artist.name).join(', '),
-          album: item.track.album.name,
-          albumImageUrl: item.track.album.images?.[0]?.url || '',
+          artist: item.track.artists?.map((artist) => artist.name).join(', ') || '',
+          album: item.track.album?.name || '',
+          albumImageUrl: item.track.album?.images?.[0]?.url || '',
           songUrl: item.track.external_urls?.spotify || 'https://open.spotify.com',
           playedAt: item.played_at,
           durationMs: item.track.duration_ms,
@@ -185,12 +250,21 @@ export async function getSpotifyData() {
     } else {
       const errorText = await recentlyPlayedRes.text();
       console.warn(`[Spotify API] Recently played returned status ${recentlyPlayedRes.status}:`, errorText);
+      if (cache.lastPlayedItem) {
+        return cache.lastPlayedItem;
+      }
       return {
         isPlaying: false,
         isOffline: true,
         error: errorText,
         message: 'Could not fetch recently played track from Spotify',
       };
+    }
+
+    if (cache.lastPlayedItem) {
+      cache.lastData = cache.lastPlayedItem;
+      cache.lastDataAt = Date.now();
+      return cache.lastPlayedItem;
     }
 
     const fallback = {
