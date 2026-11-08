@@ -163,7 +163,9 @@ export default function SpotifyNowPlaying({ compact = false }) {
               {t('spotify.live')}
             </span>
             <span className="font-medium text-textMain max-w-[150px] truncate">{data.title}</span>
-            <span className="text-textMuted max-w-[100px] truncate">• {data.artist}</span>
+            {data.artist && (
+              <span className="text-textMuted max-w-[100px] truncate">• {data.artist}</span>
+            )}
           </div>
         ) : (
           <span className="text-textMuted">{hasTrack ? `${t('spotify.recent')}: ${data.title}` : t('spotify.offline')}</span>
@@ -247,10 +249,12 @@ export default function SpotifyNowPlaying({ compact = false }) {
                 href={data.songUrl}
                 className="font-bold text-textMain hover:text-[#1DB954] transition-colors block text-sm sm:text-base group-hover:underline cursor-pointer"
               />
-              <MarqueeText
-                text={data.artist}
-                className="text-textMuted text-xs sm:text-sm"
-              />
+              {data.artist && (
+                <MarqueeText
+                  text={data.artist}
+                  className="text-textMuted text-xs sm:text-sm"
+                />
+              )}
               {data.album && (
                 <p className="text-[11px] text-textMuted/60 truncate max-w-full text-center" title={data.album}>
                   {data.album}
